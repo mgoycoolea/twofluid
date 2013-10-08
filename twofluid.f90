@@ -1,8 +1,8 @@
 program twofluid
   use read_input_mod
+  use init_variables
   use equations_gas_conservative
   use TVDLF
-  use init_variables
   implicit none
 
 
@@ -55,6 +55,7 @@ contains
 
 end module equations_gas_conservative
 
+
 module TVDLF
   use constants, only: dp
   implicit none
@@ -67,6 +68,7 @@ end module TVDLF
 module read_input_mod
   use constants, only: dp
   implicit none
+  public
 
 contains
   
