@@ -1,8 +1,12 @@
+program twofluid
+  use read_input_mod
+  use equations_gas_conservative
+  use TVDLF
+  use init_variables
+  implicit none
 
 
-
-
-
+end program twofluid
 
 
 ! All the constants in the program go here, will be useful for equations
@@ -18,80 +22,94 @@ module constants
 end module constants
 
 
+module init_variables
+  use constants, only: dp
+  implicit none
+  public
+
+  real(dp), allocatable, dimension(:) ::&
+       Ne1, Ne2, Te1, Te2, Vre1, Vre2, &
+       Ni1, Ni2, Ti1, Ti2, Vri1, Vri2
+
+contains
+
+  subroutine initial_conditions()
+    write(*,*) 'I do something'
+  end subroutine initial_conditions
+end module init_variables
+
+
+
 ! All equations go here
-module equations
-  use constants, only: dp
+module equations_gas_conservative
+  use constants
   implicit none
   private
-  public 
+  !public 
 
 contains
+  real(dp) function dNe_dt(var_string, R, VRE, DLOGE, GRAD_VRE, GRAD_DLOGE) result(output)
+    real(dp), intent(in) :: R, VRE, DLOGE, GRAD_VRE, GRAD_DLOGE
+    character(len=*), intent(in) :: var_string
+  end function dNe_dt
 
-end module equations
+end module equations_gas_conservative
 
-module read_input
+module TVDLF
   use constants, only: dp
   implicit none
   private
-
-  open(9,file='input_twofluid',status='old')
-  read(9,*)
-  read(9,*) N0
-  read(9,*)
-  read(9,*) tau
-  read(9,*)
-  read(9,*) vol
-  read(9,*)
-  read(9,*) ENin0
-  read(9,*)
-  read(9,*) dt
-  read(9,*)
-  read(9,*) rsteps
-  read(9,*)
-  read(9,*) timetot
-  read(9,*)
-  read(9,*) R0
-  read(9,*)
-  read(9,*) Rdomain
-  read(9,*)
-  read(9,*) savepoint
-  read(9,*)
-  read(9,*) savefreq
-  read(9,*)
-  read(9,*) Bext
-  close(9)
-
-  OPEN(30,file='input_print',STATUS='replace')
-  write(30,*) N0
-  write(30,*) tau
-  write(30,*) vol
-  write(30,*) ENin0
-  write(30,*) dt
-  write(30,*) rsteps
-  write(30,*) timetot
-  write(30,*) R0
-  write(30,*) Rdomain
-  write(30,*) savepoint
-  write(30,*) savefreq
-  write(30,*) Bext
-  close(30)
+  !public 
   
+end module TVDLF
 
 
-end module read_input
-
-
-module variables
+module read_input_mod
   use constants, only: dp
   implicit none
-  private
-  public 
-
-  real(dp), allocatable, dimension(:) ::& 
-       Ne1, Ne2, Te1, Te2, Vre1, Vre2 &
-       Ni1, Ni2, Ti1, Ti2, Vri1, Vri2 &
-
 
 contains
+  
+  subroutine read_input()
+    real(dp) :: N0, tau, vol, ENin0, dt, rsteps, timetot, R0,&
+         Rdomain, savepoint, savefreq, Bext
 
-end module equations
+    open(9,file='input_twofluid',status='old')
+    read(9,*) N0
+    read(9,*) tau
+    read(9,*) vol
+    read(9,*) ENin0
+    read(9,*) dt
+    read(9,*) rsteps
+    read(9,*) timetot
+    read(9,*) R0
+    read(9,*) Rdomain
+    read(9,*) savepoint
+    read(9,*) savefreq
+    read(9,*) Bext
+    close(9)
+
+    OPEN(30,file='print_input',STATUS='replace')
+    write(30,*) N0
+    write(30,*) tau
+    write(30,*) vol
+    write(30,*) ENin0
+    write(30,*) dt
+    write(30,*) rsteps
+    write(30,*) timetot
+    write(30,*) R0
+    write(30,*) Rdomain
+    write(30,*) savepoint
+    write(30,*) savefreq
+    write(30,*) Bext
+    close(30)
+  end subroutine read_input
+
+end module read_input_mod
+
+
+
+
+
+
+
