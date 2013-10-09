@@ -7,7 +7,7 @@
 #                  Prof. Francesco Giammanco
 #python_version  : python 3.3.1 , numpy 1.7.1
 #==========================================================================
-something retarede
+something sane
 import numpy as np
 copy = np.copy
 empty = np.empty
