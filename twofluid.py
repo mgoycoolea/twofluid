@@ -7,7 +7,7 @@
 #                  Prof. Francesco Giammanco
 #python_version  : python 3.3.1 , numpy 1.7.1
 #==========================================================================
-something retarede
+
 import numpy as np
 copy = np.copy
 empty = np.empty
@@ -34,9 +34,9 @@ vol_discharge = 1000
 Bz_ext = 2e3
 
 deltat = 1e-11
-nstep = int(1e4)
+nstep = int(1e2)
 save_freq = int(1e0)
-scheme = 'rk4' #either euler or rk4
+scheme = 'heun' #either euler, heun, or rk4
 
 discharge_on = False
 
@@ -74,11 +74,12 @@ def integration_scheme(scheme):
 
 def create_grids(rdomain, rpoints):
     ''' Return array where rdomain is the length of R
-    and rpoints is the number of grid points.'''
+    and rpoints is the number of grid points. The first
+    point is a distance dr/2 from the origin.'''
 
-    R = np.linspace(0,rdomain,rpoints)
-    dr = R[1]-R[0]
-    R += dr
+    dr = rdomain / rpoints
+    n = arange(rpoints)
+    R = dr*(n + 1/2)
     return R, dr
 
 
@@ -186,52 +187,52 @@ def computevar0(var):
     var0[-1] = (var[-2] + var[-1])/2
 
     return var0
-#######################
-# Evolution Equations #
-#######################
+####################################
+# Conservative Evolution Equations #
+####################################
 
-#Density
-def dlogne_dt(R, vr_e, gradvr_e, gradlogn_e):
-    output = -vr_e/R - gradvr_e - vr_e*gradlogn_e
-    return output
+def flux_limiter(Up, Um):
+    sign = where(Up > 0, 1, -1)
+    lim_slope = sign*maximum(0, 
+                             minimum(2*vabs(Up), 
+                                      minimum(2*sign*Um,
+                                              1/2*sign*(Up+Um))))
+    return lim_slope
 
-def dlogni_dt(R, vr_i, gradvr_i, gradlogn_i):
-    output = -vr_i/R - gradvr_i - vr_i*gradlogn_i
-    return output 
- 
-#Temperature
-def dTe_dt(R, vr_e, gradvr_e, T_e, T_i, gradT_e, collision_ei, den_e, energy_factor):
 
-    #output = (T_i-T_e)*collision_ei - 7e5*np.sqrt(T_e)*den_e*(1+13.6/T_e) + energy_factor
-    output = -vr_e*gradT_e -2/3*(T_e*vr_e/R + T_e*gradvr_e)
-    return output
+def dvar_dt(var, flux, source, dt, dr, dz, R, Vr):
 
-def dTi_dt(T_e, T_i, collision_ei):
+    var_p = empty(rpoints)
+    var_m = empty(rpoints)
+    
+    # Shifting the variable 1 entry up or down to do vector operations
+    var_p[0:-1] =  var[1:]
+    var_p[-1] = 0
 
-    output  = -(T_i-T_e)*collision_ei
-    return output
+    var_m[1:] = var[0:-1]
+    var_m[0] = var_m[1]
 
-#Radial Velocity
-def dVre_dt(vr_e, vth_e, gradvr_e, gradP_e, collision_vel, Er_tot, Bz_tot):
 
-    #output =  - 1.6e15*gradP_e - vr_e*gradvr_e - 1.6e7*vth_e*Bz_tot - collision_vel*vr_e - 5e17*Er_tot
-    output = - 1.6e15*gradP_e - vr_e*gradvr_e
-    return output
+    phi_diff = 1/2*((var_p - var) - (var - var_m)) #include Courant number to reduce viscocity
 
-def dVri_dt(vr_i, vth_i, gradvr_i, gradP_i, collision_ii, Er_tot, Bz_tot):
+    limgrad = flux_limiter(var_p - var, var - var_m)
 
-    output = -collision_ii*vr_i + 3e14*Er_tot - 1e12*gradP_i - vr_i*gradvr_i + 1e4*vth_i*Bz_tot
-    return output
+    limgrad_p = empty(rpoints)
+    limgrad_m = empty(rpoints)
+    # Shifting the variable 1 entry up or down to do vector operations
+    
+    limgrad_p[0:-1] =  limgrad[1:]
+    limgrad_p[-1] =  0
 
-#Angular velocity
-def dVthe_dt(vr_e, vth_e, gradvth_e, collision_vel, Bz_tot):
+    limgrad_m[1:] =  limgrad[0:-1]
+    limgrad_m[0] =  limgrad_m[1]
 
-    output = -collision_vel*vth_e + 1.6e7*vr_e*Bz_tot - vr_e*gradvth_e
-    return output
+    varL_p = var + 1/2 * limgrad
+    varR_p = var_p - 1/2 * limgrad_p
+    varL_m = var_m + 1/2 * limgrad_m
+    varL_m = var - 1/2 * limgrad
+    
 
-def dVthi_dt(vr_i, vth_i, gradvth_i, collision_ii, Bz_tot):
-    output = -collision_ii*vth_i - 1e4*vr_i*Bz_tot - vr_i*gradvth_i
-    return output
 
 ############################
 # Main Program Starts Here #
