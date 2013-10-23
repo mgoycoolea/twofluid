@@ -9,49 +9,46 @@
 #==========================================================================
 
 import numpy as np
-copy = np.copy
+from scipy import sparse as spr
 empty = np.empty
 vsum = np.sum
 vexp = np.exp
-grad = np.gradient
 dot = np.dot
-clip = np.clip
 where = np.where
 vsqrt = np.sqrt
 vabs = np.abs
+zeros_like = np.zeros_like
+empty_like = np.empty_like
+maximum = np.maximum
+minimum = np.minimum
+fmax = np.fmax
+fmin = np.fmin
 
 ##########################
 # System Input Variables #
 ##########################
-rdomain = 10
-rpoints = 1000
+rdomain = 20
+rpoints = 20
+zdomain = 10
+zpoints = 10
 T_0 = 0.1
-max_energy_in = 5
-max_den_0 = 1e-5
+max_den_0 = 1e14
 radius_den_0 = 2
-time_discharge = 1e-8
-vol_discharge = 1000
-Bz_ext = 2e3
+Bz_ext = 0
 
-deltat = 1e-11
+dt = 1e-10
 nstep = int(1e2)
 save_freq = int(1e0)
 scheme = 'heun' #either euler, heun, or rk4
 
-discharge_on = False
-
-electrons_on = True
-ions_on = False
-
-controls_on = False
 
 ####################
 # Global Variables #
 ####################
 
-c = 3e10
-zero_vector = np.zeros(rpoints)
-number_save_points = nstep//save_freq
+c = 3e10 #speed of light
+gas_gamma = 5/3
+number_saves = nstep//save_freq
 
 ####################
 # Helper Functions #
@@ -72,34 +69,24 @@ def integration_scheme(scheme):
 
     return time_vector, weight_vector
 
-def create_grids(rdomain, rpoints):
+def create_grids(rdomain, rpoints, zdomain, zpoints):
     ''' Return array where rdomain is the length of R
     and rpoints is the number of grid points. The first
     point is a distance dr/2 from the origin.'''
 
-    dr = rdomain / rpoints
-    n = arange(rpoints)
-    R = dr*(n + 1/2)
-    return R, dr
+
+    R = np.linspace(0, rdomain, rpoints)
+    dr = R[1] - R[0]
+    R += dr/2
+    Z = np.linspace(0, zdomain, zpoints)
+    dz = Z[1] - Z[0]
+    Rgrid, Zgrid = np.meshgrid(R, Z, indexing='ij')
+    return R, dr, Z, dz, Rgrid, Zgrid
 
 
 #####################
 # Fields and Energy #
 #####################
-
-def calc_energy_in(max_den_0, vol_discharge, max_energy_in):
-    ''' Compute if the max energy of the capacitor can
-    excite the volume of electrons needed.'''
-
-    energy_ionize = 1.6*13.6*max_den_0*vol_discharge
-
-    if max_energy_in > energy_ionize:
-        net_energy_in =  max_energy_in - energy_ionize
-    else:
-        net_energy_in = 0
-        print('Not enough energy to ionize volume!')
-
-    return net_energy_in, energy_ionize
 
 
 def compute_electric_field(charge_sep, debye):
@@ -157,285 +144,318 @@ def compute_thermalizations(R, time, radius_den_0, time_discharge, vol_discharge
     return energy_factor, collision_vel, collision_ii, collision_ei
 
 
-
-def compute_gradients(N_e, T_e, vr_e, vth_e,
-                       N_i, T_i, vr_i, vth_i, dr):
-    
-    gradlog_e = grad(N_e, dr)
-    gradlog_i = grad(N_i, dr)
-    gradT_e = grad(T_e, dr)
-    gradT_i = grad(T_i, dr)
-    gradvr_e = grad(vr_e, dr)
-    gradvr_i = grad(vr_i, dr)
-    gradvth_e = grad(vth_e, dr)
-    gradvth_i = grad(vth_i, dr)
-
-    gradP_e = gradT_e + T_e*gradlogn_e
-    gradP_i = gradT_i + T_i*gradlogn_i
-
-    return (gradlogn_e, gradT_e, gradvr_e, gradvth_e, gradP_e,
-            gradlogn_i, gradT_i, gradvr_i, gradvth_i, gradP_i)
-
 def compute_debye(T_e, T_i, den_e, den_i):
-    output = clip(2.5e-7*np.sqrt((T_e+T_i)/(den_e+den_i)), 0, dr)
+    output = 2.5e-7*np.sqrt(1/(den_e/T_e+den_i/T_i))
     return output
 
-def computevar0(var):
-    var0 = empty(rpoints)
-    var0[1:-1] = (var[2:] + var[0:-2])/2
-    var0[0] = (var[1] + var[0])/2
-    var0[-1] = (var[-2] + var[-1])/2
-
-    return var0
 ####################################
 # Conservative Evolution Equations #
 ####################################
 
-def flux_limiter(Up, Um):
-    sign = where(Up > 0, 1, -1)
-    lim_slope = sign*maximum(0, 
-                             minimum(2*vabs(Up), 
-                                      minimum(2*sign*Um,
-                                              1/2*sign*(Up+Um))))
+def radial_corrections(R):
+
+    i_p = np.arange(1, rpoints + 1) + 1/2
+    i = np.arange(0, rpoints) + 1/2
+    i_m = np.arange(-1, rpoints - 1) + 1/2 
+    i_m[0] = i_m[1] #This can't be negative
+
+    curvature_mod = 1/(6*i)
+    centered = 1 - 1/(12*i_p*i_m)
+    forward =  1 - 1/(12*i*i_p)
+    backward =  1 - 1/(12*i*i_m)
+    
+    ones = np.ones(zpoints)
+    curvature_mod = np.meshgrid(curvature_mod, ones, indexing='ij')[0]
+    backward = np.meshgrid(backward, ones, indexing='ij')[0]
+    centered = np.meshgrid(centered, ones, indexing='ij')[0]
+    forward = np.meshgrid(forward, ones, indexing='ij')[0]
+
+    return curvature_mod, backward, centered, forward
+
+
+def evolve_vars(N, NVr, NVt, NVz, En, B, species):
+
+    # Reconstruct variables at the left and right of interfaces
+    # Eg. o-L|R-o- ...- o-L|R-o where o are the middle values and | the interfaces
+    # Note that the count starts after the first node, origin values will be set
+    # with flux boundary conditions.
+
+    # In the r-direction
+    N_L_r, N_R_r = RL_states(N, 'r')
+    NVr_L_r, NVr_R_r = RL_states(NVr, 'r')
+    NVt_L_r, NVt_R_r = RL_states(NVt, 'r')
+    NVz_L_r, NVz_R_r = RL_states(NVz, 'r')
+    En_L_r, En_R_r = RL_states(En, 'r')
+
+    # In the z-direction
+    N_L_z, N_R_z = RL_states(N, 'z')
+    NVr_L_z, NVr_R_z = RL_states(NVr, 'z')
+    NVt_L_z, NVt_R_z = RL_states(NVt, 'z')
+    NVz_L_z, NVz_R_z = RL_states(NVz, 'z')
+    En_L_z, En_R_z = RL_states(En, 'z')
+
+    # Reconstruct velocities and pressures at interfaces
+    Vr_L_r = NVr_L_r / N_L_r
+    Vt_L_r = NVt_L_r / N_L_r
+    Vz_L_r = NVz_L_r / N_L_r
+
+    Vr_R_r = NVr_R_r / N_R_r
+    Vt_R_r = NVt_R_r / N_R_r
+    Vz_R_r = NVz_R_r / N_R_r
+    
+    Vr_L_z = NVr_L_z / N_L_z
+    Vt_L_z = NVt_L_z / N_L_z
+    Vz_L_z = NVz_L_z / N_L_z
+
+    Vr_R_z = NVr_R_z / N_R_z
+    Vt_R_z = NVt_R_z / N_R_z
+    Vz_R_z = NVz_R_z / N_R_z
+
+    P_L_r = (En_L_r - 1/2*N_L_r*(Vr_L_r**2 + Vt_L_r**2 + Vz_L_r**2))*(gas_gamma-1)
+    P_R_r = (En_R_r - 1/2*N_R_r*(Vr_R_r**2 + Vt_R_r**2 + Vz_R_r**2))*(gas_gamma-1)
+
+    P_L_z = (En_L_z - 1/2*N_L_z*(Vr_L_z**2 + Vt_L_z**2 + Vz_L_z**2))*(gas_gamma-1)
+    P_R_z = (En_R_z - 1/2*N_R_z*(Vr_R_z**2 + Vt_R_z**2 + Vz_R_z**2))*(gas_gamma-1)
+
+    # Source terms:
+    # This has to be added eventually, for now none.
+    N_source = 0
+    NVr_source = 0
+    NVt_source = 0
+    NVz_source = 0
+    En_source = 0
+
+    # Compute fluxes at each side of the interface.
+    N_Lflux_r = NVr_L_r
+    N_Rflux_r = NVr_R_r
+    N_Lflux_z = NVz_L_z
+    N_Rflux_z = NVz_R_z
+
+    NVr_Lflux_r = NVr_L_r*Vr_L_r + P_L_r
+    NVr_Rflux_r = NVr_R_r*Vr_R_r + P_R_r
+    NVr_Lflux_z = NVr_L_z*Vz_L_z + P_L_z
+    NVr_Rflux_z = NVr_R_z*Vz_R_z + P_R_z
+
+    NVt_Lflux_r = NVt_L_r*Vr_L_r + P_L_r
+    NVt_Rflux_r = NVt_R_r*Vr_R_r + P_R_r
+    NVt_Lflux_z = NVt_L_z*Vz_L_z + P_L_z
+    NVt_Rflux_z = NVt_R_z*Vz_R_z + P_R_z
+
+    NVz_Lflux_r = NVz_L_r*Vr_L_r + P_L_r
+    NVz_Rflux_r = NVz_R_r*Vr_R_r + P_R_r
+    NVz_Lflux_z = NVz_L_z*Vz_L_z + P_L_z
+    NVz_Rflux_z = NVz_R_z*Vz_R_z + P_R_z
+
+    En_Lflux_r = (En_L_r - P_L_r)*Vr_L_r
+    En_Rflux_r = (En_R_r - P_R_r)*Vr_R_r
+    En_Lflux_z = (En_L_z - P_L_z)*Vz_L_z
+    En_Rflux_z = (En_R_z - P_R_z)*Vz_R_z
+
+
+    N_flux_r = flux_function(N_Lflux_r, N_Rflux_r, N_L_r, N_R_r, 'r')
+    N_flux_z = flux_function(N_Lflux_z, N_Rflux_z, N_L_z, N_R_z, 'z')
+    NVr_flux_r = flux_function(NVr_Lflux_r, NVr_Rflux_r, NVr_L_r, NVr_R_r, 'r')
+    NVr_flux_z = flux_function(NVr_Lflux_z, NVr_Rflux_z, NVr_L_z, NVr_R_z, 'z')
+    NVt_flux_r = flux_function(NVt_Lflux_r, NVt_Rflux_r, NVt_L_r, NVt_R_r, 'r')
+    NVt_flux_z = flux_function(NVt_Lflux_z, NVt_Rflux_z, NVt_L_z, NVt_R_z, 'z')
+    NVz_flux_r = flux_function(NVz_Lflux_r, NVz_Rflux_r, NVz_L_r, NVz_R_r, 'r')
+    NVz_flux_z = flux_function(NVz_Lflux_z, NVz_Rflux_z, NVz_L_z, NVz_R_z, 'z')
+    En_flux_r = flux_function(En_Lflux_r, En_Rflux_r, En_L_r, En_R_r, 'r')
+    En_flux_z = flux_function(En_Lflux_z, En_Rflux_z, En_L_z, En_R_z, 'z')
+    
+
+    # Evolution:
+    N_new = compute_next_step(N, N_flux_r, N_flux_z, N_source)
+    NVr_new = compute_next_step(NVr, NVr_flux_r, NVr_flux_z, NVr_source)
+    NVt_new = compute_next_step(NVt, NVt_flux_r, NVt_flux_z, NVt_source)
+    NVz_new = compute_next_step(NVz, NVz_flux_r, NVz_flux_z, NVz_source)
+    En_new = compute_next_step(En, En_flux_r, En_flux_z, En_source)
+
+    return N_new, NVr_new, NVt_new, NVz_new, En_new, B
+
+
+def RL_states(var, axis):
+    
+    limiter = slope_limiter(var, axis)
+
+    if axis == 'r':
+        U_R = np.empty_like(var)
+        U_L = var + 1/2*limiter*(1 - curvature_mod)
+        U_R[:-1,:] = var[1:,:] - 1/2*limiter[1:,:]*(1 + curvature_mod[1:,:])
+        U_R[-1,:] = U_R[-2,:]
+
+    if axis == 'z':
+        U_R = np.empty_like(var)
+        U_L = var + 1/2*limiter
+        U_R[:,:-1] = var[:,1:] - 1/2*limiter[:,1:]
+        U_R[:,-1] = U_R[:,-2]
+
+    return U_L, U_R
+
+def slope_limiter(var, axis):
+    if axis == 'z':
+        var_p = empty_like(var)
+        var_p[:,:-1] = var[:,1:]
+        var_p[:,-1] = var_p[:,-2]
+
+        var_m = empty_like(var)
+        var_m[:,1:] = var[:,:-1]
+        var_m[:,0] = var_m[:,1]
+
+        Up = var_p - var
+        Um = var - var_m
+        
+        signUp = np.sign(Up) 
+
+        lim_slope = fmax(0,fmin(2*vabs(Up), 
+                                fmin(2*Um*signUp, 
+                                     1/2*(Up+Um)*signUp) ) )
+
+
+    if axis == 'r':
+
+        var_p = empty_like(var)
+        var_p[:-1,:] = var[1:,:]
+        var_p[-1,:] = var_p[-2,:]
+
+        var_m = empty_like(var)
+        var_m[1:,:] = var[:-1,:]
+        var_m[0,:] = var_m[1,:]
+
+        Up = var_p - var
+        Um = var - var_m
+        
+        signUp = np.sign(Up) 
+        lim_slope = signUp*fmax(0, 
+                                fmin(2*vabs(Up)/forward, 
+                                     fmin(2*signUp*Um/backward,
+                                          1/2*signUp*(Up+Um)/centered)))
+    
     return lim_slope
-
-
-def dvar_dt(var, flux, source, dt, dr, dz, R, Vr):
-
-    var_p = empty(rpoints)
-    var_m = empty(rpoints)
+        
     
-    # Shifting the variable 1 entry up or down to do vector operations
-    var_p[0:-1] =  var[1:]
-    var_p[-1] = 0
-
-    var_m[1:] = var[0:-1]
-    var_m[0] = var_m[1]
 
 
-    phi_diff = 1/2*((var_p - var) - (var - var_m)) #include Courant number to reduce viscocity
-
-    limgrad = flux_limiter(var_p - var, var - var_m)
-
-    limgrad_p = empty(rpoints)
-    limgrad_m = empty(rpoints)
-    # Shifting the variable 1 entry up or down to do vector operations
+def compute_next_step(var, flux_r, flux_z, sources):
     
-    limgrad_p[0:-1] =  limgrad[1:]
-    limgrad_p[-1] =  0
-
-    limgrad_m[1:] =  limgrad[0:-1]
-    limgrad_m[0] =  limgrad_m[1]
-
-    varL_p = var + 1/2 * limgrad
-    varR_p = var_p - 1/2 * limgrad_p
-    varL_m = var_m + 1/2 * limgrad_m
-    varL_m = var - 1/2 * limgrad
+    next_var = var - dt * ( ((Rgrid+1/2*dr)*flux_r[1:,:] - (Rgrid-1/2*dr)*flux_r[:-1,:])/(Rgrid*dr) +
+                            (flux_z[:,1:] - flux_z[:,:-1])/dz + sources)
     
+    next_var[0,:] =  var[0,:] - dt * ( 2*flux_r[1,:]/dr +
+                            (flux_z[0,1:] - flux_z[0,:-1])/dz + sources)
+
+    return next_var
+
+def flux_function(Flux_L, Flux_R, Var_L, Var_R, axis):
+
+    if axis == 'r':
+        flux = empty((rpoints+1, zpoints))
+        flux[1:,:] = 1/2*(Flux_R + Flux_L - (Var_R - Var_L))
+        flux[0, :] = 0
+    if axis == 'z':
+        flux = empty((rpoints, zpoints+1))
+        flux[:,1:] = 1/2*(Flux_R + Flux_L - (Var_R - Var_L))
+        flux[:,0] = 0
+        flux[:,-1] = 0
+    return flux
 
 
 ############################
 # Main Program Starts Here #
 ############################
-#import pdb; pdb.set_trace()
-time_vector, weight_vector = integration_scheme(scheme)
-zero_vector = np.zeros(rpoints)
 
 # System Initial Conditions
-R, dr = create_grids(rdomain, rpoints)
-net_energy_in, energy_ionize = calc_energy_in(max_den_0, vol_discharge, max_energy_in)
 
-logn_e = -(R/radius_den_0)**2
-logn_i = -(R/radius_den_0)**2
-T_e = T_0*np.ones(rpoints)
-T_i = T_0*np.ones(rpoints)
-vr_e = 5e7*np.sqrt(T_e)
-vr_i = np.zeros(rpoints)
-vth_e = np.zeros(rpoints)
-vth_i = np.zeros(rpoints)
+R, dr, Z, dz, Rgrid, Zgrid = create_grids(rdomain, rpoints, zdomain, zpoints)
+curvature_mod, backward, centered, forward =  radial_corrections(R)
+
+N_e = np.ones_like(Rgrid)#max_den_0*vexp(-(Rgrid/radius_den_0)**2)
+NVr_e = zeros_like(Rgrid)
+NVt_e = zeros_like(Rgrid)
+NVz_e = zeros_like(Rgrid)
+En_e = T_0*N_e/(gas_gamma-1)
+
+N_i = max_den_0*vexp(-(Rgrid/radius_den_0)**2)
+NVr_i = zeros_like(Rgrid)
+NVt_i = zeros_like(Rgrid)
+NVz_i = zeros_like(Rgrid)
+En_i = T_0*N_i/(gas_gamma - 1) 
 
 
-#energy_0 = 0.5 * vsum(den_e * vr_e**2)*dr
+N_e_0 = empty_like(Rgrid)
+NVr_e_0 = empty_like(Rgrid)
+NVt_e_0 = empty_like(Rgrid)
+NVz_e_0 = empty_like(Rgrid)
+En_e_0 = empty_like(Rgrid)
+
+N_i_0 = empty_like(Rgrid)
+NVr_i_0 = empty_like(Rgrid)
+NVt_i_0 = empty_like(Rgrid)
+NVz_i_0 = empty_like(Rgrid)
+En_i_0 = empty_like(Rgrid)
 
 #Saving Paramaters
-order_integ = np.size(time_vector)
+save_dim = (number_saves, rpoints, zpoints)
+N_e_out = empty(save_dim)
+Vr_e_out = empty(save_dim)
+Vt_e_out = empty(save_dim)
+Vz_e_out = empty(save_dim)
+En_e_out = empty(save_dim)
 
-N_e_rk = empty((order_integ, rpoints)) 
-N_i_rk = empty((order_integ, rpoints)) 
-T_e_rk = empty((order_integ, rpoints))
-T_i_rk = empty((order_integ, rpoints))
-vr_e_rk = empty((order_integ, rpoints))
-vr_i_rk = empty((order_integ, rpoints))
-vth_e_rk = empty((order_integ, rpoints))
-vth_i_rk = empty((order_integ, rpoints))
+N_i_out = empty(save_dim) 
+Vr_i_out = empty(save_dim)
+Vt_i_out = empty(save_dim)
+Vz_i_out = empty(save_dim)
+En_i_out = empty(save_dim)
 
-N_e_out = empty((number_save_points, rpoints)) 
-N_i_out = empty((number_save_points, rpoints)) 
-T_e_out = empty((number_save_points, rpoints))
-T_i_out = empty((number_save_points, rpoints))
-vr_e_out = empty((number_save_points, rpoints))
-vr_i_out = empty((number_save_points, rpoints))
-vth_e_out = empty((number_save_points, rpoints))
-vth_i_out = empty((number_save_points, rpoints))
-Er_out = empty((number_save_points, rpoints))
-Bz_int_out = empty((number_save_points, rpoints))
+Er_out = empty(save_dim)
 
-gradN_e_out = empty((number_save_points, rpoints))
-gradvr_e_out = empty((number_save_points, rpoints))
-gradvth_e_out = empty((number_save_points, rpoints))
-gradP_e_out = empty((number_save_points, rpoints))
-
- 
-
+N_new, NVr_new, NVt_new, NVz_new, En_new, B = evolve_vars(N_e, NVr_e, NVt_e, NVz_e, En_e, 0, 'e')
 #Time Loop
 for t in range(nstep):
-    time = t*deltat
-    
-    if (time > 5*time_discharge):
-        discharge_on = False
+    time = t*dt
 
-    N_e_0 = copy(logn_e) 
-    N_i_0 = copy(logn_i) 
-    T_e_0 = copy(T_e)
-    T_i_0 = copy(T_i)
-    vr_e_0 = copy(vr_e)
-    vr_i_0 = copy(vr_i)
-    vth_e_0 = copy(vth_e)
-    vth_i_0 = copy(vth_i)
+    N_e_0[:,:] = N_e
+    NVr_e_0[:,:] = NVr_e
+    NVt_e_0[:,:] = NVt_e
+    NVz_e_0[:,:] = NVz_e
+    En_e_0[:,:] = En_e
 
+    N_i_0[:,:] = N_i
+    NVr_i_0[:,:] = NVr_i
+    NVt_i_0[:,:] = NVt_i
+    NVz_i_0[:,:] = NVz_i
+    En_i_0[:,:] = En_i
 
-    for n in range(order_integ):
-        
-        ############################
-        # Fields, Energy and Grads #
-        ############################
-                
-        time_rk = time + deltat*time_vector[n]
-        den_i = max_den_0 * vexp(logn_i)
-        den_e = max_den_0 * vexp(logn_e)
-        #charge_sep = den_i - den_e
-        charge_sep = 0
-        #debye = compute_debye(T_e, T_i, den_e, den_i)
-        debye = dr
-        #Er_tot = compute_electric_field(charge_sep, debye)
-        Er_tot = 0
         #Bz_int = compute_magnetic_field(den_e, den_i, vth_e, vth_i, dr)
-        Bz_int = 0
-        Bz_tot = 0 # Bz_int + Bz_ext
+        #Er_tot = compute_electric_field(charge_sep, debye)
+
         
-        (energy_factor, collision_vel,
-         collision_ii, collision_ei) = 0,0,0,0 #compute_thermalizations(R, time_rk, radius_den_0, time_discharge, vol_discharge,
-        #net_energy_in, discharge_on, den_e, den_i, T_e, T_i)
-
-        (gradlogn_e, gradT_e, gradvr_e, gradvth_e, gradP_e,
-         gradlogn_i, gradT_i, gradvr_i, gradvth_i, gradP_i) = compute_gradients(logn_e, T_e, vr_e, vth_e,
-                                                                                logn_i, T_i, vr_i, vth_i, dr)
-
-        if n == 0:
-            #masse = vsum(den_e)*dr
-            #massi = vsum(den_i)*dr
-            #Keenergy = vsum((vr_e**2 + vth_e**2)*den_e*10**19 * 9.1094e-28 )*0.5
-            #Kienergy = vsum((vr_i**2 + vth_i**2)*den_i*10**19 * 1.6726e-24 )*0.5
-            #Benergy = vsum(Bz_int**2) / (np.pi*8)
-            #Eenergy = vsum(Er_tot**2) / (np.pi*8)
-            #print(Keenergy,Kienergy, Benergy, Eenergy, Keenergy + Kienergy + Benergy + Eenergy)
-            #v_e_max = vsqrt(vabs(-1e18*Er_tot*debye - 3.2e15*gradP_e*dr))
-            #v_i_max = vsqrt(vabs(dr*(6e14*Er_tot - 2e12*gradP_i)))
+        #masse = vsum(den_e)*dr
+        #massi = vsum(den_i)*dr
+        #Keenergy = vsum((vr_e**2 + vth_e**2)*den_e*10**19 * 9.1094e-28 )*0.5
+        #Kienergy = vsum((vr_i**2 + vth_i**2)*den_i*10**19 * 1.6726e-24 )*0.5
+        #Benergy = vsum(Bz_int**2) / (np.pi*8)
+        #Eenergy = vsum(Er_tot**2) / (np.pi*8)
+        #print(Keenergy,Kienergy, Benergy, Eenergy, Keenergy + Kienergy + Benergy + Eenergy)
+        #v_e_max = vsqrt(vabs(-1e18*Er_tot*debye - 3.2e15*gradP_e*dr))
+        #v_i_max = vsqrt(vabs(dr*(6e14*Er_tot - 2e12*gradP_i)))
 
             ####################
             # Saving Variables #
             ####################
-            if t%save_freq == 0:
-                i = t//save_freq
-                den_e_out[i] = copy(max_den_0*vexp(logn_e)) 
-                den_i_out[i] = copy(max_den_0*vexp(logn_i)) 
-                T_e_out[i] = copy(T_e)
-                T_i_out[i] = copy(T_i)
-                vr_e_out[i] = copy(vr_e)
-                vr_i_out[i] = copy(vr_i)
-                vth_e_out[i] = copy(vth_e)
-                vth_i_out[i] = copy(vth_i)
-                Er_out[i] = copy(Er_tot)
-                Bz_int_out[i] = copy(Bz_int)
-                gradlogn_e_out[i] = copy(gradlogn_e)
-                gradvr_e_out[i] = copy(gradvr_e)
-                gradvth_e_out[i] = copy(gradvth_e)
-                gradP_e_out[i] = copy(gradP_e)
-                #print('mass =' + str(dr * vsum(den_e)) + ' energy =' + str(E - 0.5*dr*vsum(dene_e * (vr_e**2 vth_e**2))* + energy_0*r) )
-
-        ######################
-        #    Electron Eqs    #
-        ######################
-
-        if electrons_on:
-            logn_e_rk[n] =  dlogne_dt(R, vr_e, gradvr_e, gradlogn_e)
-            T_e_rk[n] = dTe_dt(R, vr_e, gradvr_e, T_e, T_i, gradT_e, collision_ei, den_e, energy_factor)
-            vr_e_rk[n] = dVre_dt(vr_e, vth_e, gradvr_e, gradP_e, collision_vel, Er_tot, Bz_tot)
-            vth_e_rk[n] = dVthe_dt(vr_e, vth_e, gradvth_e, collision_vel, Bz_tot)
-        else:
-            logn_e_rk[n] = zero_vector
-            T_e_rk[n] = zero_vector
-            vr_e_rk[n] = zero_vector
-            vth_e_rk[n] = zero_vector
-
-        ######################
-        #       Ion Eqs      #
-        ######################
-            
-        if ions_on:
-            logn_i_rk[n] =  dlogni_dt(R, vr_i, gradvr_i, gradlogn_i)
-            T_i_rk[n] = dTi_dt(T_e, T_i, collision_ei)
-            vr_i_rk[n] = dVri_dt(vr_i, vth_i, gradvr_i, gradP_i, collision_ii, Er_tot, Bz_tot)
-            vth_i_rk[n] = dVthi_dt(vr_i, vth_i, gradvth_i, collision_ii, Bz_tot)
-        else:
-            logn_i_rk[n] = zero_vector
-            T_i_rk[n] = zero_vector
-            vr_i_rk[n] = zero_vector
-            vth_i_rk[n] = zero_vector
-
-        ################################
-        # RK4 Section, Adjusting Steps #
-        ################################
-
-        if (order_integ > 1) and (n < 3):
-            rk_step = time_vector[n+1]
-            logn_e = logn_e_0 + logn_e_rk[n] * (deltat*rk_step)
-            logn_i = logn_i_0 + logn_i_rk[n] * (deltat*rk_step)
-            T_e = T_e_0 + T_e_rk[n] * (deltat*rk_step)
-            T_i = T_i_0 + T_i_rk[n] * (deltat*rk_step)
-            vr_e = vr_e_0 + vr_e_rk[n] * (deltat*rk_step)
-            vr_i = vr_i_0 + vr_i_rk[n] * (deltat*rk_step)
-            vth_e = vth_e_0 + vth_e_rk[n] * (deltat*rk_step)
-            vth_i = vth_i_0 + vth_i_rk[n] * (deltat*rk_step)
-
-    #######################
-    #   System Evolution  #    
-    ####################### 
-    
-    # Apply weight to each RK element and sum them
-    logn_e = logn_e_0 + deltat*dot(weight_vector, logn_e_rk)[0]
-    logn_i = logn_i_0 + deltat*dot(weight_vector, logn_i_rk)[0]
-    T_e = T_e_0 + deltat*dot(weight_vector, T_e_rk)[0]
-    T_i = T_i_0 + deltat*dot(weight_vector, T_i_rk)[0]
-    vr_e = vr_e_0 + deltat*dot(weight_vector, vr_e_rk)[0]
-    vr_i = vr_i_0 + deltat*dot(weight_vector, vr_i_rk)[0]
-    vth_e = vth_e_0 + deltat*dot(weight_vector, vth_e_rk)[0]
-    vth_i = vth_i_0 + deltat*dot(weight_vector, vth_i_rk)[0]
-
-    
-    
-    ###############
-    #   Control   #
-    ###############
-    if controls_on:
-        vr_e = clip(vr_e, -v_e_max, v_e_max)
-        vr_i = clip(vr_i, -v_i_max, v_i_max)
-        vth_e = clip(vth_e, -v_e_max, v_e_max)
-        vth_i = clip(vth_i, -v_i_max, v_i_max)
-
-
-
-
+    if t%save_freq == 0:
+        i = t//save_freq
+        N_e_out[i] = N_e
+        N_i_out[i] = N_i
+        Vr_e_out[i] = NVr_e / N_e
+        Vr_i_out[i] = NVr_i / N_i
+        Vt_e_out[i] = NVt_e / N_e
+        Vt_i_out[i] = NVt_i / N_i
+        Vz_e_out[i] = NVz_e / N_e
+        Vz_i_out[i] = NVz_i / N_i
+        En_e_out[i] = En_e
+        En_i_out[i] = En_i
 
 
 ###################
@@ -492,4 +512,4 @@ def quick_plot(i, electrons = 1, ions=0, fields=0):
         plt.plot(gradvth_e_out[i])
         
         plt.show()
-    print('t= ' + str(deltat*i*save_freq))
+    print('t= ' + str(dt*i*save_freq))
