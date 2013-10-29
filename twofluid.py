@@ -177,8 +177,7 @@ def evolve_vars(N, NVr, NVt, NVz, En, B, species):
 
     # Reconstruct variables at the left and right of interfaces
     # Eg. o-L|R-o- ...- o-L|R-o where o are the middle values and | the interfaces
-    # Note that the count starts after the first node, origin values will be set
-    # with flux boundary conditions.
+
 
     # In the r-direction
     N_L_r, N_R_r = RL_states(N, 'r')
@@ -193,6 +192,19 @@ def evolve_vars(N, NVr, NVt, NVz, En, B, species):
     NVt_L_z, NVt_R_z = RL_states(NVt, 'z')
     NVz_L_z, NVz_R_z = RL_states(NVz, 'z')
     En_L_z, En_R_z = RL_states(En, 'z')
+
+
+    # Reflective boundary conditions in z. Only z-momentum is opposite!
+    N_L_z[:,0] =  N_R_z[:,0]
+    N_R_z[:,-1] =  N_L_z[:,-1]
+    NVr_L_z[:,0] =  NVr_R_z[:,0]
+    NVr_R_z[:,-1] =  NVr_L_z[:,-1]
+    NVt_L_z[:,0] =  NVt_R_z[:,0]
+    NVt_R_z[:,-1] =  NVt_L_z[:,-1]
+    NVz_L_z[:,0] =  -NVz_R_z[:,0]
+    NVz_R_z[:,-1] =  -NVz_L_z[:,-1]
+    En_L_z[:,0] =  En_R_z[:,0]
+    En_R_z[:,-1] =  En_L_z[:,-1]
 
     # Reconstruct velocities and pressures at interfaces
     Vr_L_r = NVr_L_r / N_L_r
@@ -279,17 +291,18 @@ def RL_states(var, axis):
     limiter = slope_limiter(var, axis)
 
     if axis == 'r':
-        U_R = np.empty_like(var)
-        U_L = var + 1/2*limiter*(1 - curvature_mod)
-        U_R[:-1,:] = var[1:,:] - 1/2*limiter[1:,:]*(1 + curvature_mod[1:,:])
-        U_R[-1,:] = U_R[-2,:]
+        U_L = empty((rpoints + 1, zpoints))
+        U_R = empty((rpoints + 1, zpoints))
+        U_L[1:,:] = var + 1/2*limiter*(1 - curvature_mod)
+        U_R[1:-1,:] = var[1:,:] - 1/2*limiter[1:,:]*(1 + curvature_mod[1:,:])
+        U_R[-1,:] = U_L[-1,:]
 
     if axis == 'z':
-        U_R = np.empty_like(var)
-        U_L = var + 1/2*limiter
-        U_R[:,:-1] = var[:,1:] - 1/2*limiter[:,1:]
-        U_R[:,-1] = U_R[:,-2]
-
+        U_L = empty((rpoints, zpoints + 1))
+        U_R = empty((rpoints, zpoints + 1)) # One more interface than points in z-dir
+        U_L[:,1:] = var + 1/2*limiter
+        U_R[:,:-1] = var - 1/2*limiter
+        # Must set the initial conditions for each variable at the first L and the last R state. 
     return U_L, U_R
 
 def slope_limiter(var, axis):
@@ -349,14 +362,11 @@ def compute_next_step(var, flux_r, flux_z, sources):
 def flux_function(Flux_L, Flux_R, Var_L, Var_R, axis):
 
     if axis == 'r':
-        flux = empty((rpoints+1, zpoints))
-        flux[1:,:] = 1/2*(Flux_R + Flux_L - (Var_R - Var_L))
-        flux[0, :] = 0
+        flux = empty((rpoints + 1, zpoints))
+        flux[,:] = 1/2*(Flux_R + Flux_L - dr/dt*(Var_R - Var_L))
     if axis == 'z':
         flux = empty((rpoints, zpoints+1))
-        flux[:,1:] = 1/2*(Flux_R + Flux_L - (Var_R - Var_L))
-        flux[:,0] = 0
-        flux[:,-1] = 0
+        flux = 1/2*(Flux_R + Flux_L - dz/dt*(Var_R - Var_L))
     return flux
 
 
@@ -369,7 +379,7 @@ def flux_function(Flux_L, Flux_R, Var_L, Var_R, axis):
 R, dr, Z, dz, Rgrid, Zgrid = create_grids(rdomain, rpoints, zdomain, zpoints)
 curvature_mod, backward, centered, forward =  radial_corrections(R)
 
-N_e = np.ones_like(Rgrid)#max_den_0*vexp(-(Rgrid/radius_den_0)**2)
+N_e = max_den_0*vexp(-(Zgrid/radius_den_0)**2)
 NVr_e = zeros_like(Rgrid)
 NVt_e = zeros_like(Rgrid)
 NVz_e = zeros_like(Rgrid)
