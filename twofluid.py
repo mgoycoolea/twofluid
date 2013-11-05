@@ -26,13 +26,13 @@ vsign = np.sign
 ##########################
 
 rdomain = 5
-rpoints = 10
+rpoints = 50
 zdomain = 10
-zpoints = 10
+zpoints = 50
 
 dt = 1e-12
-nstep = 3#int(1e0)
-save_freq = int(1e0)
+nstep = int(1e4)
+save_freq = int(1e1)
 scheme = 'heun' #either euler, heun, or rk4
 
 T_0 = 0.1
@@ -201,7 +201,7 @@ def flux_function(flux_m, flux_p, var_m, var_p, axis):
 R, dr, Z, dz, Rgrid, Zgrid = create_grids(rdomain, rpoints, zdomain, zpoints)
 curvature_mod, backward, centered, forward =  radial_corrections(R)
 
-N_e = np.ones_like(Rgrid) #max_den_0*vexp(-(Zgrid/radius_den_0)**2)
+N_e = max_den_0*vexp(-(Rgrid/radius_den_0)**2)
 NVr_e = zeros_like(Rgrid)
 NVt_e = zeros_like(Rgrid)
 NVz_e = zeros_like(Rgrid)
@@ -230,15 +230,15 @@ En_i_0 = empty_like(Rgrid)
 #Saving Paramaters
 save_dim = (number_saves, rpoints, zpoints)
 N_e_out = empty(save_dim)
-Vr_e_out = empty(save_dim)
-Vt_e_out = empty(save_dim)
-Vz_e_out = empty(save_dim)
+NVr_e_out = empty(save_dim)
+NVt_e_out = empty(save_dim)
+NVz_e_out = empty(save_dim)
 En_e_out = empty(save_dim)
 
 N_i_out = empty(save_dim) 
-Vr_i_out = empty(save_dim)
-Vt_i_out = empty(save_dim)
-Vz_i_out = empty(save_dim)
+NVr_i_out = empty(save_dim)
+NVt_i_out = empty(save_dim)
+NVz_i_out = empty(save_dim)
 En_i_out = empty(save_dim)
 
 Er_out = empty(save_dim)
@@ -255,12 +255,12 @@ for t in range(nstep):
         i = t//save_freq
         N_e_out[i] = N_e
         N_i_out[i] = N_i
-        Vr_e_out[i] = NVr_e / N_e
-        Vr_i_out[i] = NVr_i / N_i
-        Vt_e_out[i] = NVt_e / N_e
-        Vt_i_out[i] = NVt_i / N_i
-        Vz_e_out[i] = NVz_e / N_e
-        Vz_i_out[i] = NVz_i / N_i
+        NVr_e_out[i] = NVr_e / N_e
+        NVr_i_out[i] = NVr_i / N_i
+        NVt_e_out[i] = NVt_e / N_e
+        NVt_i_out[i] = NVt_i / N_i
+        NVz_e_out[i] = NVz_e / N_e
+        NVz_i_out[i] = NVz_i / N_i
         En_e_out[i] = En_e
         En_i_out[i] = En_i
 
@@ -281,11 +281,11 @@ for t in range(nstep):
 
     # Reconstruct conserved variables at the minus and plus side of interfaces with proper boudary conditions
 
-    N_rm, N_rp, N_zm, N_zp = PM_states(N_e_0, z_bci = 'ref', z_bcf='ref')
-    NVr_rm, NVr_rp, NVr_zm, NVr_zp = PM_states(NVr_e_0, z_bci = 'ref', z_bcf='ref')
-    NVt_rm, NVt_rp, NVt_zm, NVt_zp = PM_states(NVt_e_0, z_bci = 'ref', z_bcf='ref')
-    NVz_rm, NVz_rp, NVz_zm, NVz_zp = PM_states(NVz_e_0, z_bci = 'inv', z_bcf='inv')
-    En_rm, En_rp, En_zm, En_zp = PM_states(En_e_0, z_bci = 'ref', z_bcf='ref')
+    N_rm, N_rp, N_zm, N_zp = PM_states(N_e_0)#, z_bci = 'ref', z_bcf='ref')
+    NVr_rm, NVr_rp, NVr_zm, NVr_zp = PM_states(NVr_e_0)#, z_bci = 'ref', z_bcf='ref')
+    NVt_rm, NVt_rp, NVt_zm, NVt_zp = PM_states(NVt_e_0)#, z_bci = 'ref', z_bcf='ref')
+    NVz_rm, NVz_rp, NVz_zm, NVz_zp = PM_states(NVz_e_0)#, z_bci = 'inv', z_bcf='inv')
+    En_rm, En_rp, En_zm, En_zp = PM_states(En_e_0)#, z_bci = 'ref', z_bcf='ref')
 
 
     # Reconstruct velocities and pressures at interfaces
