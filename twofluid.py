@@ -31,7 +31,7 @@ zdomain = 10
 zpoints = 10
 
 dt = 1e-12
-nstep = int(1e0)
+nstep = 3#int(1e0)
 save_freq = int(1e0)
 scheme = 'heun' #either euler, heun, or rk4
 
@@ -327,16 +327,16 @@ for t in range(nstep):
 
     NVr_rm_flux = NVr_rm*Vr_rm + P_rm
     NVr_rp_flux = NVr_rp*Vr_rp + P_rp
-    NVr_zm_flux = NVr_zm*Vz_zm + P_zm
-    NVr_zp_flux = NVr_zp*Vz_zp + P_zp
+    NVr_zm_flux = NVr_zm*Vz_zm 
+    NVr_zp_flux = NVr_zp*Vz_zp
 
-    NVt_rm_flux = NVt_rm*Vr_rm + P_rm
-    NVt_rp_flux = NVt_rp*Vr_rp + P_rp
-    NVt_zm_flux = NVt_zm*Vz_zm + P_zm
-    NVt_zp_flux = NVt_zp*Vz_zp + P_zp
+    NVt_rm_flux = NVt_rm*Vr_rm
+    NVt_rp_flux = NVt_rp*Vr_rp 
+    NVt_zm_flux = NVt_zm*Vz_zm 
+    NVt_zp_flux = NVt_zp*Vz_zp
 
-    NVz_rm_flux = NVz_rm*Vr_rm + P_rm
-    NVz_rp_flux = NVz_rp*Vr_rp + P_rp
+    NVz_rm_flux = NVz_rm*Vr_rm
+    NVz_rp_flux = NVz_rp*Vr_rp 
     NVz_zm_flux = NVz_zm*Vz_zm + P_zm
     NVz_zp_flux = NVz_zp*Vz_zp + P_zp
 
