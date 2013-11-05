@@ -186,9 +186,9 @@ def flux_function(flux_m, flux_p, var_m, var_p, axis):
     if axis == 'r':
         flux = empty((rpoints+1, zpoints))
         flux[0,:] = 0
-        flux[1:,:] = 1/2*(flux_m + flux_p - dr/dt*(var_p - var_m))
+        flux[1:,:] = 1/2*(flux_p - flux_m - dr/dt*(var_p - var_m))
     if axis == 'z':
-        flux = 1/2*(flux_m + flux_p - dz/dt*(var_p - var_m))
+        flux = 1/2*(flux_p - flux_m - dz/dt*(var_p - var_m))
     return flux
 
 
