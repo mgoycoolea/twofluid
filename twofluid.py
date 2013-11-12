@@ -9,6 +9,7 @@
 #==========================================================================
 import numpy as np
 empty = np.empty
+zeros = np.zeros
 vsum = np.sum
 vexp = np.exp
 dot = np.dot
@@ -26,14 +27,15 @@ vsign = np.sign
 ##########################
 
 rdomain = 5
-rpoints = 50
+rpoints = 100
 zdomain = 10
-zpoints = 50
+zpoints = 100
 
-dt = 1e-12
+dt = 1e-3
 nstep = int(1e4)
-save_freq = int(1e1)
+save_freq = int(1e2)
 scheme = 'heun' #either euler, heun, or rk4
+init_cond = 'zbarrier'
 
 T_0 = 0.1
 max_den_0 = 1e14
@@ -62,7 +64,10 @@ def create_grids(rdomain, rpoints, zdomain, zpoints):
     dz = Z[1] - Z[0]
     Z += dz/2
     Rgrid, Zgrid = np.meshgrid(R, Z, indexing='ij')
-    return R, dr, Z, dz, Rgrid, Zgrid
+    Rcentroid_grid = np.zeros((rpoints+1, zpoints))
+    Rcentroid_grid[:-1,:] = Rgrid + dr**2/(12*Rgrid)
+    Rcentroid_grid[-1,:] = (Rgrid[-1,:]+dr) + dr**2/(12*(Rgrid[-1,:] + dr))
+    return R, dr, Z, dz, Rgrid, Zgrid, Rcentroid_grid
 
 
 
@@ -111,7 +116,7 @@ def PM_states(var, r_bc ='open', z_bci='open', z_bcf='open'):
         var_r_bc[-1,:] = var_r_bc[-4,:]
 
     # Differences that will be used as input the slope limiter with corrections
-    # Note that the indexing starts from the second point (the origin volume is treated separately)
+    # Note that the indexing starts from the second volume (the first volume is treated separately)
     r_diff = np.diff(var_r_bc, axis=0)
     r_forw = r_diff[1:,:]
     r_back = r_diff[:-1,:]
@@ -124,9 +129,9 @@ def PM_states(var, r_bc ='open', z_bci='open', z_bcf='open'):
     signUr = vsign(U_rf)
     r_slope = empty_like(r_diff)
     r_slope[1:,:] = fmax(0,fmin(vabs(U_rf), fmin(U_rb*signUr, U_rc*signUr) ) )
-    #The first point is special because it can't do central differences, take forward instead.
-    # (A backward differencing in the second point is the same as forward differencing on first)
-    r_slope[0,:] = r_back[0,:] / backward[0,:] 
+    #The first point is special because it can't do central differences.
+    #Assume it is the same as second point
+    r_slope[0,:] = U_rb[0,:]
   
     # The pm states for r!
     rm = var_r_bc[:-2,:] + 1/2*r_slope[:-1,:]*(1 - curvature_mod[:-1,:])
@@ -175,20 +180,21 @@ def PM_states(var, r_bc ='open', z_bci='open', z_bcf='open'):
 
 
 def compute_next_step(var, r_flux, z_flux, sources):
-    
-    next_var = var - dt * ( ((Rgrid+1/2*dr)*r_flux[1:,:] - (Rgrid-1/2*dr)*r_flux[:-1,:])/(Rgrid*dr) +
-                            (z_flux[:,1:] - z_flux[:,:-1])/dz + sources)
+    Rplus = Rgrid+1/2*dr
+    Rminus = Rgrid-1/2*dr
+    next_var = var - dt * ( (Rplus*r_flux[1:,:] - Rminus*r_flux[:-1,:])/(Rgrid*dr) +
+                            (z_flux[:,1:] - z_flux[:,:-1])/dz - sources)
 
     return next_var
 
-def flux_function(flux_m, flux_p, var_m, var_p, axis):
+def flux_function(flux_m, flux_p, var_m, var_p, max_speed, axis):
 
     if axis == 'r':
         flux = empty((rpoints+1, zpoints))
         flux[0,:] = 0
-        flux[1:,:] = 1/2*(flux_p - flux_m - dr/dt*(var_p - var_m))
+        flux[1:,:] = 1/2*(flux_p + flux_m - max_speed*(var_p - var_m))
     if axis == 'z':
-        flux = 1/2*(flux_p - flux_m - dz/dt*(var_p - var_m))
+        flux = 1/2*(flux_p + flux_m - max_speed*(var_p - var_m))
     return flux
 
 
@@ -198,14 +204,40 @@ def flux_function(flux_m, flux_p, var_m, var_p, axis):
 
 # System Initial Conditions
 
-R, dr, Z, dz, Rgrid, Zgrid = create_grids(rdomain, rpoints, zdomain, zpoints)
+R, dr, Z, dz, Rgrid, Zgrid, Rcentroid = create_grids(rdomain, rpoints, zdomain, zpoints)
 curvature_mod, backward, centered, forward =  radial_corrections(R)
 
-N_e = max_den_0*vexp(-(Rgrid/radius_den_0)**2)
-NVr_e = zeros_like(Rgrid)
-NVt_e = zeros_like(Rgrid)
-NVz_e = zeros_like(Rgrid)
-En_e = T_0*N_e/(gas_gamma-1)
+if init_cond == 'zstep':
+    N_e = where((Zgrid > zdomain/2), 2e14, 1e14)#np.ones_like(Rgrid)##max_den_0*vexp(-(Zgrid/radius_den_0)**2)
+    Vr_e = zeros_like(Rgrid)
+    Vt_e = zeros_like(Rgrid)
+    Vz_e = zeros_like(Rgrid) #where(Zgrid>zdomain/2, c/100, 0)
+
+elif init_cond == 'zgauss':
+    N_e = max_den_0*vexp(-(Zgrid/radius_den_0)**2)
+    Vr_e = zeros_like(Rgrid)
+    Vt_e = zeros_like(Rgrid)
+    Vz_e = zeros_like(Rgrid)
+
+elif init_cond == 'zmove':
+    N_e = max_den_0*np.ones_like(Rgrid)
+    Vr_e = zeros_like(Rgrid)
+    Vt_e = zeros_like(Rgrid)
+    Vz_e = where(Zgrid<zdomain/2, vsqrt(T_0/(gas_gamma-1)), 0)
+
+if init_cond == 'zbarrier':
+    N_e = where((Zgrid > zdomain/3)*(Zgrid < zdomain*2/3), 2e14, 1e14)#np.ones_like(Rgrid)##max_den_0*vexp(-(Zgrid/radius_den_0)**2)
+    Vr_e = zeros_like(Rgrid)
+    Vt_e = zeros_like(Rgrid)
+    Vz_e = zeros_like(Rgrid) #where(Zgrid>zdomain/2, c/100, 0)
+
+
+
+
+NVr_e = N_e*Vr_e
+NVt_e = N_e*Vt_e
+NVz_e = N_e*Vz_e
+En_e = T_0*N_e/(gas_gamma-1) + 1/2*N_e*(Vr_e**2+Vt_e**2+Vz_e**2)
 
 N_i = max_den_0*vexp(-(Rgrid/radius_den_0)**2)
 NVr_i = zeros_like(Rgrid)
@@ -215,33 +247,33 @@ En_i = T_0*N_i/(gas_gamma - 1)
 
 
 # Initial values for each time step
-N_e_0 = empty_like(Rgrid)
-NVr_e_0 = empty_like(Rgrid)
-NVt_e_0 = empty_like(Rgrid)
-NVz_e_0 = empty_like(Rgrid)
-En_e_0 = empty_like(Rgrid)
+N_e_0 = zeros_like(Rgrid)
+NVr_e_0 = zeros_like(Rgrid)
+NVt_e_0 = zeros_like(Rgrid)
+NVz_e_0 = zeros_like(Rgrid)
+En_e_0 = zeros_like(Rgrid)
 
-N_i_0 = empty_like(Rgrid)
-NVr_i_0 = empty_like(Rgrid)
-NVt_i_0 = empty_like(Rgrid)
-NVz_i_0 = empty_like(Rgrid)
-En_i_0 = empty_like(Rgrid)
+N_i_0 = zeros_like(Rgrid)
+NVr_i_0 = zeros_like(Rgrid)
+NVt_i_0 = zeros_like(Rgrid)
+NVz_i_0 = zeros_like(Rgrid)
+En_i_0 = zeros_like(Rgrid)
 
 #Saving Paramaters
 save_dim = (number_saves, rpoints, zpoints)
-N_e_out = empty(save_dim)
-NVr_e_out = empty(save_dim)
-NVt_e_out = empty(save_dim)
-NVz_e_out = empty(save_dim)
-En_e_out = empty(save_dim)
+N_e_out = zeros(save_dim)
+NVr_e_out = zeros(save_dim)
+NVt_e_out = zeros(save_dim)
+NVz_e_out = zeros(save_dim)
+En_e_out = zeros(save_dim)
 
-N_i_out = empty(save_dim) 
-NVr_i_out = empty(save_dim)
-NVt_i_out = empty(save_dim)
-NVz_i_out = empty(save_dim)
-En_i_out = empty(save_dim)
+N_i_out = zeros(save_dim) 
+NVr_i_out = zeros(save_dim)
+NVt_i_out = zeros(save_dim)
+NVz_i_out = zeros(save_dim)
+En_i_out = zeros(save_dim)
 
-Er_out = empty(save_dim)
+Er_out = zeros(save_dim)
 
 
 #Time Loop
@@ -255,12 +287,12 @@ for t in range(nstep):
         i = t//save_freq
         N_e_out[i] = N_e
         N_i_out[i] = N_i
-        NVr_e_out[i] = NVr_e / N_e
-        NVr_i_out[i] = NVr_i / N_i
-        NVt_e_out[i] = NVt_e / N_e
-        NVt_i_out[i] = NVt_i / N_i
-        NVz_e_out[i] = NVz_e / N_e
-        NVz_i_out[i] = NVz_i / N_i
+        NVr_e_out[i] = NVr_e
+        NVr_i_out[i] = NVr_i
+        NVt_e_out[i] = NVt_e
+        NVt_i_out[i] = NVt_i
+        NVz_e_out[i] = NVz_e
+        NVz_i_out[i] = NVz_i
         En_e_out[i] = En_e
         En_i_out[i] = En_i
 
@@ -279,83 +311,97 @@ for t in range(nstep):
     NVz_i_0[:,:] = NVz_i
     En_i_0[:,:] = En_i
 
-    # Reconstruct conserved variables at the minus and plus side of interfaces with proper boudary conditions
+    # Reconstruct primitive variables at the minus and plus side of interfaces with proper boudary conditions
+    Vr_e = NVr_e / N_e
+    Vt_e = NVt_e / N_e
+    Vz_e = NVz_e / N_e
+    P_e = (En_e - 1/2*N_e*(Vr_e**2 + Vt_e**2 + Vz_e**2))*(gas_gamma-1)
 
-    N_rm, N_rp, N_zm, N_zp = PM_states(N_e_0)#, z_bci = 'ref', z_bcf='ref')
-    NVr_rm, NVr_rp, NVr_zm, NVr_zp = PM_states(NVr_e_0)#, z_bci = 'ref', z_bcf='ref')
-    NVt_rm, NVt_rp, NVt_zm, NVt_zp = PM_states(NVt_e_0)#, z_bci = 'ref', z_bcf='ref')
-    NVz_rm, NVz_rp, NVz_zm, NVz_zp = PM_states(NVz_e_0)#, z_bci = 'inv', z_bcf='inv')
-    En_rm, En_rp, En_zm, En_zp = PM_states(En_e_0)#, z_bci = 'ref', z_bcf='ref')
+    N_rm, N_rp, N_zm, N_zp = PM_states(N_e, z_bci = 'ref', z_bcf='ref')
+    Vr_rm, Vr_rp, Vr_zm, Vr_zp = PM_states(Vr_e, z_bci = 'ref', z_bcf='ref')
+    Vt_rm, Vt_rp, Vt_zm, Vt_zp = PM_states(Vt_e, z_bci = 'ref', z_bcf='ref')
+    Vz_rm, Vz_rp, Vz_zm, Vz_zp = PM_states(Vz_e, z_bci = 'inv', z_bcf='inv')
+    P_rm, P_rp, P_zm, P_zp = PM_states(P_e, z_bci = 'ref', z_bcf='ref')
 
+    NVr_rm = N_rm * Vr_rm 
+    NVr_rp = N_rp * Vr_rp
+    NVr_zm = N_zm * Vr_zm
+    NVr_zp = N_zp * Vr_zp
 
-    # Reconstruct velocities and pressures at interfaces
-    Vr_rm = NVr_rm / N_rm
-    Vt_rm = NVt_rm / N_rm
-    Vz_rm = NVz_rm / N_rm
+    NVt_rm = N_rm * Vt_rm
+    NVt_rp = N_rp * Vt_rp
+    NVt_zm = N_zm * Vt_zm
+    NVt_zp = N_zp * Vt_zp
 
-    Vr_rp = NVr_rp / N_rp
-    Vt_rp = NVt_rp / N_rp
-    Vz_rp = NVz_rp / N_rp
-    
-    Vr_zm = NVr_zm / N_zm
-    Vt_zm = NVt_zm / N_zm
-    Vz_zm = NVz_zm / N_zm
+    NVz_rm = N_rm * Vz_rm
+    NVz_rp = N_rp * Vz_rp
+    NVz_zm = N_zm * Vz_zm
+    NVz_zp = N_zp * Vz_zp
 
-    Vr_zp = NVr_zp / N_zp
-    Vt_zp = NVt_zp / N_zp
-    Vz_zp = NVz_zp / N_zp
-
-    P_rm = (En_rm - 1/2*N_rm*(Vr_rm**2 + Vt_rm**2 + Vz_rm**2))*(gas_gamma-1)
-    P_rp = (En_rp - 1/2*N_rp*(Vr_rp**2 + Vt_rp**2 + Vz_rp**2))*(gas_gamma-1)
-
-    P_zm = (En_zm - 1/2*N_zm*(Vr_zm**2 + Vt_zm**2 + Vz_zm**2))*(gas_gamma-1)
-    P_zp = (En_zp - 1/2*N_zp*(Vr_zp**2 + Vt_zp**2 + Vz_zp**2))*(gas_gamma-1)
+    En_rm = P_rm/(gas_gamma -1) + N_rm*(Vr_rm**2 + Vt_rm**2+Vz_rm**2)
+    En_rp = P_rp/(gas_gamma -1) + N_rp*(Vr_rp**2 + Vt_rp**2+Vz_rp**2)
+    En_zm = P_zm/(gas_gamma -1) + N_zm*(Vr_zm**2 + Vt_zm**2+Vz_zm**2)
+    En_zp = P_zp/(gas_gamma -1) + N_zp*(Vr_zp**2 + Vt_zp**2+Vz_zp**2)
 
     # Source terms:
+    # Reconstructed variable source terms
+
+
+    # Transverse flux
+
     # This has to be added eventually, for now none.
     N_source = 0
-    NVr_source = 0
+    NVr_source = P_e / Rgrid
     NVt_source = 0
     NVz_source = 0
     En_source = 0
 
     # Compute fluxes at each side of the interface.
-    N_rm_flux = NVr_rm
-    N_rp_flux = NVr_rp
-    N_zm_flux = NVz_zm
-    N_zp_flux = NVz_zp
+    N_rm_flux = N_rm*Vr_rm
+    N_rp_flux = N_rp*Vr_rp
+    N_zm_flux = N_zm*Vz_zm
+    N_zp_flux = N_zp*Vz_zp
 
-    NVr_rm_flux = NVr_rm*Vr_rm + P_rm
-    NVr_rp_flux = NVr_rp*Vr_rp + P_rp
-    NVr_zm_flux = NVr_zm*Vz_zm 
-    NVr_zp_flux = NVr_zp*Vz_zp
+    NVr_rm_flux = N_rm*Vr_rm**2 + P_rm
+    NVr_rp_flux = N_rp*Vr_rp**2 + P_rp
+    NVr_zm_flux = N_zm*Vr_zm*Vz_zm 
+    NVr_zp_flux = N_zm*Vr_zp*Vz_zp
 
-    NVt_rm_flux = NVt_rm*Vr_rm
-    NVt_rp_flux = NVt_rp*Vr_rp 
-    NVt_zm_flux = NVt_zm*Vz_zm 
-    NVt_zp_flux = NVt_zp*Vz_zp
+    NVt_rm_flux = N_rm*Vt_rm*Vr_rm
+    NVt_rp_flux = N_rp*Vt_rp*Vr_rp 
+    NVt_zm_flux = N_zm*Vt_zm*Vz_zm 
+    NVt_zp_flux = N_zp*Vt_zp*Vz_zp
 
-    NVz_rm_flux = NVz_rm*Vr_rm
-    NVz_rp_flux = NVz_rp*Vr_rp 
-    NVz_zm_flux = NVz_zm*Vz_zm + P_zm
-    NVz_zp_flux = NVz_zp*Vz_zp + P_zp
+    NVz_rm_flux = N_rm*Vz_rm*Vr_rm
+    NVz_rp_flux = N_rp*Vz_rp*Vr_rp 
+    NVz_zm_flux = N_zm*Vz_zm**2 + P_zm
+    NVz_zp_flux = N_zp*Vz_zp**2 + P_zp
+
 
     En_rm_flux = (En_rm + P_rm)*Vr_rm
     En_rp_flux = (En_rp + P_rp)*Vr_rp
     En_zm_flux = (En_zm + P_zm)*Vz_zm
     En_zp_flux = (En_zp + P_zp)*Vz_zp
 
+    # Compute max speed for each interface state
+    max_speed_r = fmax(vsqrt(gas_gamma*P_rm/N_rm) + vabs(Vr_rm), 
+                       vsqrt(gas_gamma*P_rp/N_rp) + vabs(Vr_rp))
+    max_speed_z = fmax(vsqrt(gas_gamma*P_zm/N_zm) + vabs(Vz_zm), 
+                       vsqrt(gas_gamma*P_zp/N_zp) + vabs(Vz_zp))
+    
 
-    N_r_flux = flux_function(N_rm_flux, N_rp_flux, N_rm, N_rp, 'r')
-    N_z_flux = flux_function(N_zm_flux, N_zp_flux, N_zm, N_zp, 'z')
-    NVr_r_flux = flux_function(NVr_rm_flux, NVr_rp_flux, NVr_rm, NVr_rp, 'r')
-    NVr_z_flux = flux_function(NVr_zm_flux, NVr_zp_flux, NVr_zm, NVr_zp, 'z')
-    NVt_r_flux = flux_function(NVt_rm_flux, NVt_rp_flux, NVt_rm, NVt_rp, 'r')
-    NVt_z_flux = flux_function(NVt_zm_flux, NVt_zp_flux, NVt_zm, NVt_zp, 'z')
-    NVz_r_flux = flux_function(NVz_rm_flux, NVz_rp_flux, NVz_rm, NVz_rp, 'r')
-    NVz_z_flux = flux_function(NVz_zm_flux, NVz_zp_flux, NVz_zm, NVz_zp, 'z')
-    En_r_flux = flux_function(En_rm_flux, En_rp_flux, En_rm, En_rp, 'r')
-    En_z_flux = flux_function(En_zm_flux, En_zp_flux, En_zm, En_zp, 'z')
+    # Compute the total flux for the conservative variable
+    N_r_flux = flux_function(N_rm_flux, N_rp_flux, N_rm, N_rp, max_speed_r, 'r')
+    N_z_flux = flux_function(N_zm_flux, N_zp_flux, N_zm, N_zp, max_speed_z, 'z')
+    NVr_r_flux = flux_function(NVr_rm_flux, NVr_rp_flux, NVr_rm, NVr_rp, max_speed_r, 'r')
+    NVr_z_flux = flux_function(NVr_zm_flux, NVr_zp_flux, NVr_zm, NVr_zp, max_speed_z, 'z')
+    NVt_r_flux = flux_function(NVt_rm_flux, NVt_rp_flux, NVt_rm, NVt_rp, max_speed_r, 'r')
+    NVt_z_flux = flux_function(NVt_zm_flux, NVt_zp_flux, NVt_zm, NVt_zp, max_speed_z, 'z')
+    NVz_r_flux = flux_function(NVz_rm_flux, NVz_rp_flux, NVz_rm, NVz_rp, max_speed_r, 'r')
+    NVz_z_flux = flux_function(NVz_zm_flux, NVz_zp_flux, NVz_zm, NVz_zp, max_speed_z, 'z')
+    En_r_flux = flux_function(En_rm_flux, En_rp_flux, En_rm, En_rp, max_speed_r, 'r')
+    En_z_flux = flux_function(En_zm_flux, En_zp_flux, En_zm, En_zp, max_speed_z, 'z')
+
     
 
     # Evolution:
@@ -364,6 +410,7 @@ for t in range(nstep):
     NVt_e = compute_next_step(NVt_e_0, NVt_r_flux, NVt_z_flux, NVt_source)
     NVz_e = compute_next_step(NVz_e_0, NVz_r_flux, NVz_z_flux, NVz_source)
     En_e = compute_next_step(En_e_0, En_r_flux, En_z_flux, En_source)
+
 
 
 
